@@ -1,0 +1,305 @@
+@* ════════════════════════════════════════════════════════════════════════
+   PÁGINA DE TEST
+   Esta página sustituye al antiguo "Counter" de la plantilla de Blazor.
+   Muestra preguntas tipo test sacadas de la tabla "preguntas" de MySQL
+   (la que se cargó desde preguntas.sql).
+
+   Funciona en 3 pantallas, según el estado de las variables del @code:
+     1) Configuración  -> cuando "preguntas" es null
+     2) Pregunta actual -> mientras indiceActual < número de preguntas
+     3) Resultado final -> cuando ya se han respondido todas
+   ════════════════════════════════════════════════════════════════════════ *@
+
+@* Ruta de la página: se abre en https://localhost:7001/test *@
+@page "/test"
+
+@* InteractiveServer: los clics de los botones viajan al servidor por SignalR
+   y el servidor vuelve a pintar la página. Sin esto, la página sería
+   estática y los @onclick no harían nada. *@
+@rendermode InteractiveServer
+
+@* Necesario para usar los métodos asíncronos de EF Core (ToListAsync, etc.) *@
+@using Microsoft.EntityFrameworkCore
+
+@* Inyección de dependencias: Blazor nos da el ApplicationDbContext que se
+   registró en Program.cs con AddDbContext. A través de él consultamos MySQL. *@
+@inject ApplicationDbContext Db
+
+<PageTitle>Test</PageTitle>
+
+<h1>Test de preguntas</h1>
+
+@if (preguntas is null)
+{
+    @* ── PANTALLA 1: Configuración del test ──
+       El usuario elige filtros. @bind enlaza cada <select> con una variable
+       del @code: al cambiar el desplegable, cambia la variable (y al revés). *@
+    <div class="card p-3" style="max-width: 420px">
+        <div class="mb-3">
+            <label class="form-label">Año</label>
+            <select class="form-select" @bind="anyoElegido">
+                @* El valor 0 significa "sin filtro de año" *@
+                <option value="0">Todos</option>
+                @* Los años no están escritos a mano: se leen de la base de datos *@
+                @foreach (var anyo in anyosDisponibles)
+                {
+                    <option value="@anyo">@anyo</option>
+                }
+            </select>
+        </div>
+
+        <div class="mb-3">
+            <label class="form-label">Bloque</label>
+            <select class="form-select" @bind="bloqueElegido">
+                @* Cadena vacía = "sin filtro de bloque" *@
+                <option value="">Todos</option>
+                @foreach (var bloque in bloquesDisponibles)
+                {
+                    <option value="@bloque">Bloque @bloque</option>
+                }
+            </select>
+        </div>
+
+        <div class="mb-3">
+            <label class="form-label">Número de preguntas</label>
+            <select class="form-select" @bind="numeroPreguntas">
+                <option value="10">10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+        </div>
+
+        @* Al pulsar, se ejecuta EmpezarTest(), que carga las preguntas *@
+        <button class="btn btn-primary" @onclick="EmpezarTest">Empezar test</button>
+
+        @* Mensaje de aviso si los filtros no devuelven ninguna pregunta *@
+        @if (mensaje is not null)
+        {
+            <p class="text-danger mt-3 mb-0">@mensaje</p>
+        }
+    </div>
+}
+else if (indiceActual < preguntas.Count)
+{
+    @* ── PANTALLA 2: Pregunta actual ──
+       Se muestra solo la pregunta de la posición indiceActual de la lista. *@
+    var pregunta = preguntas[indiceActual];
+
+    <p class="text-muted">
+        Pregunta @(indiceActual + 1) de @preguntas.Count · Aciertos: @aciertos
+        · Año @pregunta.anyo · Bloque @pregunta.bloque
+    </p>
+
+    @* Barra de progreso: el ancho es el porcentaje de preguntas ya hechas *@
+    <div class="progress mb-3" style="height: 6px">
+        <div class="progress-bar" style="width: @(indiceActual * 100 / preguntas.Count)%"></div>
+    </div>
+
+    <h5 class="mb-3">@pregunta.texto</h5>
+
+    <div class="d-grid gap-2">
+        @* Un botón por cada opción (a, b, c, d).
+           - ClaseOpcion() decide el color (verde/rojo) una vez respondida.
+           - disabled: tras responder se bloquean para no poder cambiar la respuesta.
+           - La lambda "() => Responder(letra)" pasa la letra pulsada al método. *@
+        @foreach (var (letra, texto) in Opciones(pregunta))
+        {
+            <button class="btn text-start @ClaseOpcion(pregunta, letra)"
+                    disabled="@(respuestaMarcada is not null)"
+                    @onclick="() => Responder(letra)">
+                <strong>@letra.ToUpper())</strong> @texto
+            </button>
+        }
+    </div>
+
+    @* Solo después de responder se muestra si ha acertado y el botón de seguir *@
+    @if (respuestaMarcada is not null)
+    {
+        <p class="mt-3 fw-bold @(respuestaMarcada == pregunta.correcta ? "text-success" : "text-danger")">
+            @(respuestaMarcada == pregunta.correcta
+                ? "¡Correcto!"
+                : $"Incorrecto. La respuesta correcta es la {pregunta.correcta!.ToUpper()}.")
+        </p>
+        @* En la última pregunta el botón cambia de texto *@
+        <button class="btn btn-primary" @onclick="Siguiente">
+            @(indiceActual + 1 < preguntas.Count ? "Siguiente" : "Ver resultado")
+        </button>
+    }
+}
+else
+{
+    @* ── PANTALLA 3: Resultado final ──
+       Nota y porcentaje, y repaso de las preguntas falladas. *@
+    <h3>Resultado: @aciertos / @preguntas.Count (@(aciertos * 100 / preguntas.Count)%)</h3>
+
+    @if (falladas.Count > 0)
+    {
+        <h5 class="mt-4">Preguntas falladas</h5>
+        @foreach (var (pregunta, marcada) in falladas)
+        {
+            <div class="card p-3 mb-2">
+                <p class="mb-1 fw-bold">@pregunta.texto</p>
+                <p class="mb-0 text-danger">Tu respuesta: @marcada.ToUpper()) @Texto(pregunta, marcada)</p>
+                <p class="mb-0 text-success">Correcta: @pregunta.correcta!.ToUpper()) @Texto(pregunta, pregunta.correcta)</p>
+            </div>
+        }
+    }
+
+    @* Volver a la pantalla de configuración *@
+    <button class="btn btn-primary mt-3" @onclick="NuevoTest">Nuevo test</button>
+}
+
+@code {
+    // ── Datos para rellenar los desplegables (se leen de la BD al abrir la página) ──
+    private List<int> anyosDisponibles = new();
+    private List<string> bloquesDisponibles = new();
+
+    // ── Filtros elegidos por el usuario (enlazados con @bind en los <select>) ──
+    private int anyoElegido = 0;        // 0 = todos los años
+    private string bloqueElegido = "";  // "" = todos los bloques
+    private int numeroPreguntas = 10;
+
+    // ── Estado del test ──
+    // Si "preguntas" es null estamos en la pantalla de configuración.
+    // Blazor vuelve a pintar la página cada vez que cambia una de estas variables
+    // tras un evento (@onclick), así que basta con modificarlas.
+    private List<Preguntas>? preguntas;
+    private int indiceActual = 0;          // posición de la pregunta que se está mostrando
+    private int aciertos = 0;
+    private string? respuestaMarcada;      // null = todavía no ha respondido la pregunta actual
+    private List<(Preguntas pregunta, string marcada)> falladas = new(); // para el repaso final
+    private string? mensaje;
+
+    // Se ejecuta automáticamente al cargar la página.
+    // Rellena los desplegables con los años y bloques que existen en la tabla,
+    // así si se añaden preguntas nuevas aparecen solas sin tocar el código.
+    protected override async Task OnInitializedAsync()
+    {
+        // Equivale a: SELECT DISTINCT anyo FROM preguntas WHERE anyo IS NOT NULL ORDER BY anyo
+        anyosDisponibles = await Db.Preguntas
+            .Where(p => p.anyo != null)
+            .Select(p => p.anyo!.Value)
+            .Distinct()
+            .OrderBy(a => a)
+            .ToListAsync();
+
+        // Equivale a: SELECT DISTINCT bloque FROM preguntas WHERE bloque IS NOT NULL ORDER BY bloque
+        bloquesDisponibles = await Db.Preguntas
+            .Where(p => p.bloque != null)
+            .Select(p => p.bloque!)
+            .Distinct()
+            .OrderBy(b => b)
+            .ToListAsync();
+    }
+
+    // Botón "Empezar test": elige N preguntas aleatorias que cumplan los filtros.
+    private async Task EmpezarTest()
+    {
+        // Solo preguntas con respuesta correcta válida: en la tabla hay 22 con
+        // "correcta" a NULL y no se podrían corregir.
+        // Ojo: esto todavía NO ejecuta nada en MySQL; EF Core va construyendo la
+        // consulta (IQueryable) y la lanza cuando llamamos a ToArrayAsync().
+        var consulta = Db.Preguntas.Where(p =>
+            p.correcta == "a" || p.correcta == "b" || p.correcta == "c" || p.correcta == "d");
+
+        // Los filtros se añaden solo si el usuario ha elegido algo
+        if (anyoElegido != 0)
+            consulta = consulta.Where(p => p.anyo == anyoElegido);
+        if (bloqueElegido != "")
+            consulta = consulta.Where(p => p.bloque == bloqueElegido);
+
+        // Para sacarlas al azar traemos SOLO los ids (números, muy ligero),
+        // los barajamos en C# con Random.Shared.Shuffle y nos quedamos con los N primeros.
+        // Así no hace falta traer las 1462 preguntas enteras a memoria.
+        var ids = await consulta.Select(p => p.Id).ToArrayAsync();
+        if (ids.Length == 0)
+        {
+            mensaje = "No hay preguntas con esos filtros.";
+            return;
+        }
+        Random.Shared.Shuffle(ids);
+        var elegidos = ids.Take(numeroPreguntas).ToList();
+
+        // Ahora sí, traemos las preguntas completas de esos ids.
+        // Equivale a: SELECT * FROM preguntas WHERE id IN (...)
+        // AsNoTracking: solo vamos a leerlas, no a modificarlas, así EF no las vigila.
+        var cargadas = await Db.Preguntas
+            .AsNoTracking()
+            .Where(p => elegidos.Contains(p.Id))
+            .ToListAsync();
+
+        // MySQL devuelve el "IN (...)" ordenado por id, así que las reordenamos
+        // para respetar el orden aleatorio que habíamos barajado.
+        preguntas = cargadas.OrderBy(p => elegidos.IndexOf(p.Id)).ToList();
+
+        // Reiniciar el estado por si venimos de un test anterior
+        indiceActual = 0;
+        aciertos = 0;
+        respuestaMarcada = null;
+        falladas.Clear();
+        mensaje = null;
+    }
+
+    // Al pulsar una opción: se guarda la letra y se corrige comparando
+    // con la columna "correcta" de la tabla.
+    private void Responder(string letra)
+    {
+        var pregunta = preguntas![indiceActual];
+        respuestaMarcada = letra;
+
+        if (letra == pregunta.correcta)
+            aciertos++;
+        else
+            falladas.Add((pregunta, letra)); // se guarda para mostrarla en el resultado
+    }
+
+    // Pasar a la siguiente pregunta. Cuando indiceActual llega al total,
+    // el @if de arriba muestra automáticamente la pantalla de resultado.
+    private void Siguiente()
+    {
+        respuestaMarcada = null;
+        indiceActual++;
+    }
+
+    // Volver a la pantalla de configuración
+    private void NuevoTest()
+    {
+        preguntas = null;
+    }
+
+    // Devuelve las opciones como pares (letra, texto) para poder recorrerlas
+    // con un foreach en vez de repetir 4 veces el mismo botón.
+    // Se saltan las opciones vacías porque algunas preguntas tienen menos de 4.
+    private static IEnumerable<(string letra, string texto)> Opciones(Preguntas p)
+    {
+        foreach (var letra in new[] { "a", "b", "c", "d" })
+        {
+            var texto = Texto(p, letra);
+            if (!string.IsNullOrWhiteSpace(texto))
+                yield return (letra, texto);
+        }
+    }
+
+    // Traduce una letra ("a", "b"...) al texto de esa opción.
+    // Hace falta porque en la tabla las opciones son columnas separadas (a, b, c, d).
+    private static string? Texto(Preguntas p, string? letra) => letra switch
+    {
+        "a" => p.a,
+        "b" => p.b,
+        "c" => p.c,
+        "d" => p.d,
+        _ => null
+    };
+
+    // Clase CSS de Bootstrap para cada botón de opción:
+    //  - Antes de responder: todas grises.
+    //  - Después: la correcta en verde y, si ha fallado, la que marcó en rojo.
+    private string ClaseOpcion(Preguntas p, string letra)
+    {
+        if (respuestaMarcada is null) return "btn-outline-secondary";
+        if (letra == p.correcta) return "btn-success";
+        if (letra == respuestaMarcada) return "btn-danger";
+        return "btn-outline-secondary";
+    }
+}
